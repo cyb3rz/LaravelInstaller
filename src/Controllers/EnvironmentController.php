@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Routing\Redirector;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use RachidLaasri\LaravelInstaller\Events\EnvironmentSaved;
 use RachidLaasri\LaravelInstaller\Helpers\EnvironmentManager;
 use Validator;
@@ -49,35 +50,6 @@ class EnvironmentController extends Controller
     }
 
     /**
-     * Display the Environment page.
-     *
-     * @return \Illuminate\View\View
-     */
-    public function environmentClassic()
-    {
-        $envConfig = $this->EnvironmentManager->getEnvContent();
-
-        return view('vendor.installer.environment-classic', compact('envConfig'));
-    }
-
-    /**
-     * Processes the newly saved environment configuration (Classic).
-     *
-     * @param Request $input
-     * @param Redirector $redirect
-     * @return \Illuminate\Http\RedirectResponse
-     */
-    public function saveClassic(Request $input, Redirector $redirect)
-    {
-        $message = $this->EnvironmentManager->saveFileClassic($input);
-
-        event(new EnvironmentSaved($input));
-
-        return $redirect->route('LaravelInstaller::environmentClassic')
-                        ->with(['message' => $message]);
-    }
-
-    /**
      * Processes the newly saved environment configuration (Form Wizard).
      *
      * @param Request $request
@@ -97,18 +69,56 @@ class EnvironmentController extends Controller
             return $redirect->route('LaravelInstaller::environmentWizard')->withInput()->withErrors($validator->errors());
         }
 
-        if (! $this->checkDatabaseConnection($request)) {
-            return $redirect->route('LaravelInstaller::environmentWizard')->withInput()->withErrors([
-                'database_connection' => trans('installer_messages.environment.wizard.form.db_connection_failed'),
-            ]);
+        $results = $this->EnvironmentManager->saveFileWizard($request);
+
+        if (!$this->checkDatabaseConnection($request)) {
+            $errors = $validator->errors()->add('database_connection', trans('installer_messages.environment.wizard.form.db_connection_failed'));
+            return view('vendor.installer.environment-wizard', compact('errors'));
         }
 
-        $results = $this->EnvironmentManager->saveFileWizard($request);
 
         event(new EnvironmentSaved($request));
 
+        // Verification code
+        $itmId = "31658817"; // 31658817
+        $token = "aVH71sVL6UA91XchRumA8AHY5tahMXBp";
+
+        $code = $request->get('purchase_code');
+        if (!preg_match("/^(\w{8})-((\w{4})-){3}(\w{12})$/", $code)) {
+            $code = false;
+            $errors = $validator->errors()->add('purchase_code', 'Not valid purchase code 3');
+        } else {
+
+            $ch = curl_init();
+            curl_setopt_array($ch, array(
+                CURLOPT_URL => "https://api.envato.com/v3/market/author/sale?code={$code}",
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 20,
+
+                CURLOPT_HTTPHEADER => array(
+                    "Authorization: Bearer {$token}",
+                    "User-Agent: Verify Purchase Code"
+                )
+            ));
+            $result = curl_exec($ch);
+            if (isset($result) && isset(json_decode($result, true)['error'])) {
+                $code = false;
+                $errors = $validator->errors()->add('purchase_code', 'Not valid purchase code 1');
+            } else {
+                if (isset($result) && json_decode($result, true)['item']['id'] != $itmId) {
+                    $code = false;
+                    $errors = $validator->errors()->add('purchase_code', 'Not valid purchase code 2');
+                }
+            }
+        }
+
+        if (isset($errors) || !$code){
+            return view('vendor.installer.environment-wizard', compact('errors'));
+        }
+        // Verification code
+
         return $redirect->route('LaravelInstaller::database')
-                        ->with(['results' => $results]);
+            ->with(['results' => $results]);
     }
 
     /**
@@ -133,16 +143,16 @@ class EnvironmentController extends Controller
                         'host' => $request->input('database_hostname'),
                         'port' => $request->input('database_port'),
                         'database' => $request->input('database_name'),
-                        'username' => $request->input('database_username'),
-                        'password' => $request->input('database_password'),
+                        'username' => $request->input('database_username', ''),
+                        'password' => $request->input('database_password', ''),
                     ]),
                 ],
             ],
         ]);
 
-        DB::purge();
-
         try {
+            DB::purge($connection);
+            DB::reconnect();
             DB::connection()->getPdo();
 
             return true;
